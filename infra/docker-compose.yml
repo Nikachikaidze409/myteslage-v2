@@ -36,7 +36,7 @@ services:
       - ..:/workspace
     command: sh -c "npm install && npm --workspace apps/api run dev"
     ports:
-      - "${API_PORT:-3000}:3000"
+      - "127.0.0.1:${API_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,7 +51,7 @@ services:
       - ..:/workspace
     command: sh -c "npm install && npm --workspace apps/web run dev"
     ports:
-      - "${WEB_PORT:-5173}:5173"
+      - "127.0.0.1:${WEB_PORT:-5173}:5173"
     depends_on:
       - api
 
