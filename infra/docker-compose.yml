@@ -27,14 +27,13 @@ services:
       retries: 5
 
   api:
-    image: node:22-alpine
-    working_dir: /workspace
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: myteslage-api:local
     restart: unless-stopped
     env_file:
       - ../.env
-    volumes:
-      - ..:/workspace
-    command: sh -c "npm install && npm --workspace apps/api run dev"
     ports:
       - "127.0.0.1:${API_PORT:-3000}:3000"
     depends_on:
@@ -44,14 +43,13 @@ services:
         condition: service_healthy
 
   web:
-    image: node:22-alpine
-    working_dir: /workspace
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    image: myteslage-web:local
     restart: unless-stopped
-    volumes:
-      - ..:/workspace
-    command: sh -c "npm install && npm --workspace apps/web run dev"
     ports:
-      - "127.0.0.1:${WEB_PORT:-5173}:5173"
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
     depends_on:
       - api
 
