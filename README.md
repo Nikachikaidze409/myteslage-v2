@@ -3,40 +3,15 @@
 Clean rewrite of the Tesla in-car navigation app.
 
 ## Principles
-
 - Self-hosted production infrastructure.
 - GitHub is the source of truth.
-- Lovable is used only to help write frontend code; the running product must not depend on Lovable Cloud, Lovable-hosted databases, or Lovable backend services.
-- The Tesla browser stays thin; expensive work belongs on our server where practical.
-- External API calls are centralized, cached, deduplicated, rate-limited, and observable.
-- Secrets never live in Git.
+- Lovable is a coding tool only; production must not depend on Lovable Cloud, Lovable DB, or Lovable backend.
+- Keep the Tesla browser thin.
+- Centralize, cache, deduplicate, rate-limit, and observe external API calls.
+- Never commit secrets.
 
-## Target architecture
-
-```text
-Tesla Browser
-    |
-    v
-React/Vite Web App
-    |
-    v
-Fastify API
-    |
-    +--> Redis       cache / dedup / rate-limit
-    +--> PostgreSQL  application data
-    +--> Google APIs only when needed
-```
-
-## Repository layout
-
-```text
-apps/
-  web/
-  api/
-
-infra/
-  docker-compose.yml
-
-docs/
-  architecture.md
-```
+## Local start
+1. Copy `.env.example` to `.env`.
+2. Run `docker compose -f infra/docker-compose.yml up --build`.
+3. Web: http://localhost:5173
+4. API health: http://localhost:3000/health
