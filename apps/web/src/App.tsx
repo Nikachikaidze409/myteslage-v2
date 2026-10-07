@@ -33,10 +33,19 @@ type RouteResult = {
   encodedPolyline: string;
 };
 
+type RouteProgress = {
+  distanceFromRouteMeters: number;
+  remainingGeometryMeters: number;
+  totalGeometryMeters: number;
+};
+
 const TBILISI = { lat: 41.7151, lng: 44.8271 };
 const THEME_STORAGE_KEY = "tmap-theme";
 const CAMERA_UPDATE_MIN_MS = 250;
 const MIN_BEARING_DISTANCE_METERS = 8;
+const REROUTE_COOLDOWN_MS = 8000;
+const POOR_GPS_ACCURACY_METERS = 80;
+const PROGRESS_UI_MIN_MS = 750;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -231,6 +240,60 @@ function readTheme(): ThemeMode {
   }
 }
 
+function routeProgress(
+  point: google.maps.LatLngLiteral,
+  path: google.maps.LatLngLiteral[]
+): RouteProgress | null {
+  if (path.length < 2) return null;
+
+  const earthRadius = 6371000;
+  const latScale = earthRadius * (Math.PI / 180);
+  const lngScale =
+    earthRadius * Math.cos(toRadians(point.lat)) * (Math.PI / 180);
+
+  let totalGeometryMeters = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestBefore = 0;
+  let accumulated = 0;
+
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const a = path[index];
+    const b = path[index + 1];
+    const segmentLength = distanceMeters(a, b);
+
+    const ax = (a.lng - point.lng) * lngScale;
+    const ay = (a.lat - point.lat) * latScale;
+    const bx = (b.lng - point.lng) * lngScale;
+    const by = (b.lat - point.lat) * latScale;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    const denominator = dx * dx + dy * dy;
+    const t =
+      denominator === 0
+        ? 0
+        : clamp(-(ax * dx + ay * dy) / denominator, 0, 1);
+
+    const px = ax + dx * t;
+    const py = ay + dy * t;
+    const distance = Math.hypot(px, py);
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestBefore = accumulated + segmentLength * t;
+    }
+
+    accumulated += segmentLength;
+    totalGeometryMeters += segmentLength;
+  }
+
+  return {
+    distanceFromRouteMeters: bestDistance,
+    remainingGeometryMeters: Math.max(0, totalGeometryMeters - bestBefore),
+    totalGeometryMeters
+  };
+}
+
 export default function App() {
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -243,10 +306,19 @@ export default function App() {
   const smoothedHeadingRef = useRef<number | null>(null);
   const lastSpeedRef = useRef(0);
   const lastCameraUpdateRef = useRef(0);
+  const lastProgressUiUpdateRef = useRef(0);
   const followLocationRef = useRef(true);
   const vectorHeadingRef = useRef(true);
   const didInitialZoomRef = useRef(false);
   const searchSessionTokenRef = useRef(createSearchSessionToken());
+  const destinationRef = useRef<PlaceSelection | null>(null);
+  const routeRef = useRef<RouteResult | null>(null);
+  const routePathRef = useRef<google.maps.LatLngLiteral[]>([]);
+  const navigationActiveRef = useRef(false);
+  const rerouteInFlightRef = useRef(false);
+  const lastRerouteAtRef = useRef(0);
+  const offRouteCountRef = useRef(0);
+  const lastOffRouteDistanceRef = useRef(0);
 
   const [theme] = useState<ThemeMode>(() => readTheme());
   const [gpsState, setGpsState] = useState<GpsState>("loading");
@@ -261,6 +333,10 @@ export default function App() {
   const [route, setRoute] = useState<RouteResult | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
+  const [navigationActive, setNavigationActive] = useState(false);
+  const [rerouting, setRerouting] = useState(false);
+  const [remainingDistanceMeters, setRemainingDistanceMeters] = useState<number | null>(null);
+  const [remainingDurationSeconds, setRemainingDurationSeconds] = useState<number | null>(null);
 
   const updateFollowCamera = (
     map: google.maps.Map,
@@ -300,6 +376,192 @@ export default function App() {
         heading: 0,
         tilt: 0
       });
+    }
+  };
+
+  const drawRoute = (
+    map: google.maps.Map,
+    routeData: RouteResult,
+    origin: google.maps.LatLngLiteral,
+    destinationPointValue: google.maps.LatLngLiteral,
+    fitPreview: boolean
+  ) => {
+    const routePath = decodePolyline(routeData.encodedPolyline);
+
+    routeRef.current = routeData;
+    routePathRef.current = routePath;
+    setRoute(routeData);
+    setRemainingDistanceMeters(routeData.distanceMeters);
+    setRemainingDurationSeconds(routeData.durationSeconds);
+
+    if (!routePolylineRef.current) {
+      routePolylineRef.current = new google.maps.Polyline({
+        map,
+        path: routePath,
+        clickable: false,
+        geodesic: false,
+        strokeColor: "#2563EB",
+        strokeOpacity: 0.95,
+        strokeWeight: 6,
+        zIndex: 7
+      });
+    } else {
+      routePolylineRef.current.setMap(map);
+      routePolylineRef.current.setPath(routePath);
+      routePolylineRef.current.setOptions({
+        strokeColor: "#2563EB",
+        strokeOpacity: 0.95,
+        strokeWeight: navigationActiveRef.current ? 7 : 6
+      });
+    }
+
+    if (fitPreview) {
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend(origin);
+      bounds.extend(destinationPointValue);
+      for (const routePoint of routePath) bounds.extend(routePoint);
+
+      followLocationRef.current = false;
+      map.fitBounds(bounds, {
+        top: 80,
+        right: 70,
+        bottom: 110,
+        left: 70
+      });
+      map.setTilt(0);
+      map.setHeading(0);
+    }
+  };
+
+  const requestRoute = async (
+    origin: google.maps.LatLngLiteral,
+    destinationValue: PlaceSelection,
+    fitPreview: boolean
+  ) => {
+    const response = await fetch("/api/v1/routes/compute", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        origin,
+        destination: destinationValue.location
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error("Route request failed");
+    }
+
+    const routeData = (await response.json()) as RouteResult;
+    const map = mapRef.current;
+
+    if (!map) {
+      throw new Error("Map is not ready");
+    }
+
+    drawRoute(map, routeData, origin, destinationValue.location, fitPreview);
+    return routeData;
+  };
+
+  const rerouteFrom = async (origin: google.maps.LatLngLiteral) => {
+    const destinationValue = destinationRef.current;
+    const now = Date.now();
+
+    if (
+      !navigationActiveRef.current ||
+      !destinationValue ||
+      rerouteInFlightRef.current ||
+      now - lastRerouteAtRef.current < REROUTE_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    rerouteInFlightRef.current = true;
+    lastRerouteAtRef.current = now;
+    offRouteCountRef.current = 0;
+    lastOffRouteDistanceRef.current = 0;
+    setRerouting(true);
+    setRouteError(null);
+
+    try {
+      await requestRoute(origin, destinationValue, false);
+      const map = mapRef.current;
+
+      if (map) {
+        followLocationRef.current = true;
+        updateFollowCamera(
+          map,
+          origin,
+          smoothedHeadingRef.current,
+          lastSpeedRef.current,
+          true
+        );
+      }
+    } catch {
+      setRouteError("Reroute failed");
+    } finally {
+      rerouteInFlightRef.current = false;
+      setRerouting(false);
+    }
+  };
+
+  const updateNavigationProgress = (
+    point: google.maps.LatLngLiteral,
+    positionAccuracy: number,
+    speedMetersPerSecond: number
+  ) => {
+    if (!navigationActiveRef.current) return;
+
+    const routeData = routeRef.current;
+    const routePath = routePathRef.current;
+
+    if (!routeData || routePath.length < 2) return;
+
+    const progress = routeProgress(point, routePath);
+    if (!progress) return;
+
+    const geometryRatio =
+      progress.totalGeometryMeters > 0
+        ? clamp(progress.remainingGeometryMeters / progress.totalGeometryMeters, 0, 1)
+        : 1;
+
+    const now = performance.now();
+    if (now - lastProgressUiUpdateRef.current >= PROGRESS_UI_MIN_MS) {
+      lastProgressUiUpdateRef.current = now;
+      setRemainingDistanceMeters(routeData.distanceMeters * geometryRatio);
+      setRemainingDurationSeconds(routeData.durationSeconds * geometryRatio);
+    }
+
+    const standardThreshold = Math.min(
+      35,
+      Math.max(10, positionAccuracy * 1.2, speedMetersPerSecond * 0.6)
+    );
+
+    const poorGps = positionAccuracy > POOR_GPS_ACCURACY_METERS;
+    const effectiveThreshold = poorGps
+      ? Math.max(120, positionAccuracy * 1.2)
+      : standardThreshold;
+
+    if (progress.distanceFromRouteMeters <= effectiveThreshold) {
+      offRouteCountRef.current = 0;
+      lastOffRouteDistanceRef.current = progress.distanceFromRouteMeters;
+      return;
+    }
+
+    const grossDeviation = poorGps
+      ? progress.distanceFromRouteMeters > Math.max(180, positionAccuracy * 1.5)
+      : progress.distanceFromRouteMeters > Math.max(60, standardThreshold * 2.5);
+
+    const diverging =
+      offRouteCountRef.current >= 1 &&
+      progress.distanceFromRouteMeters > lastOffRouteDistanceRef.current + 8;
+
+    offRouteCountRef.current += 1;
+    lastOffRouteDistanceRef.current = progress.distanceFromRouteMeters;
+
+    if (grossDeviation || diverging || offRouteCountRef.current >= 2) {
+      void rerouteFrom(point);
     }
   };
 
@@ -430,8 +692,10 @@ export default function App() {
 
             const heading = smoothedHeadingRef.current;
             const showDirection = heading !== null && speed >= 1.5;
+            const markerHeading =
+              navigationActiveRef.current && vectorHeadingRef.current ? 0 : heading ?? 0;
             const markerIcon = showDirection
-              ? navigationArrowIcon(heading)
+              ? navigationArrowIcon(markerHeading)
               : locationDotIcon();
 
             if (!locationMarkerRef.current) {
@@ -454,6 +718,8 @@ export default function App() {
               smoothedHeadingRef.current,
               speed
             );
+
+            updateNavigationProgress(point, positionAccuracy, speed);
           },
           (error) => {
             if (error.code === error.PERMISSION_DENIED) {
@@ -484,7 +750,6 @@ export default function App() {
       accuracyCircleRef.current?.setMap(null);
     };
   }, [theme]);
-
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -557,6 +822,7 @@ export default function App() {
 
     setSearchLoading(true);
     setSearchError(null);
+    setRouteError(null);
 
     try {
       const response = await fetch(
@@ -579,6 +845,7 @@ export default function App() {
         zIndex: 9
       });
 
+      destinationRef.current = selected;
       setDestination(selected);
       setSearchQuery(selected.name);
       setSuggestions([]);
@@ -595,60 +862,15 @@ export default function App() {
           heading: 0,
           tilt: 0
         });
+        routeRef.current = null;
+        routePathRef.current = [];
         setRoute(null);
         setRouteError("Waiting for GPS before calculating route");
         return;
       }
 
       setRouteLoading(true);
-      setRouteError(null);
-
-      const routeResponse = await fetch("/api/v1/routes/compute", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          origin,
-          destination: selected.location
-        })
-      });
-
-      if (!routeResponse.ok) {
-        throw new Error("Route request failed");
-      }
-
-      const routeData = (await routeResponse.json()) as RouteResult;
-      const routePath = decodePolyline(routeData.encodedPolyline);
-
-      routePolylineRef.current?.setMap(null);
-      routePolylineRef.current = new google.maps.Polyline({
-        map,
-        path: routePath,
-        clickable: false,
-        geodesic: false,
-        strokeColor: "#2563EB",
-        strokeOpacity: 0.95,
-        strokeWeight: 6,
-        zIndex: 7
-      });
-
-      const bounds = new google.maps.LatLngBounds();
-      bounds.extend(origin);
-      bounds.extend(selected.location);
-      for (const point of routePath) bounds.extend(point);
-
-      followLocationRef.current = false;
-      map.fitBounds(bounds, {
-        top: 80,
-        right: 70,
-        bottom: 110,
-        left: 70
-      });
-
-      map.setTilt(0);
-      map.setHeading(0);
-      setRoute(routeData);
+      await requestRoute(origin, selected, true);
     } catch {
       setSearchError("Could not open this destination");
       setRouteError("Route is temporarily unavailable");
@@ -659,6 +881,8 @@ export default function App() {
   };
 
   const openSearch = () => {
+    if (navigationActiveRef.current) return;
+
     setSearchOpen(true);
     setSearchError(null);
 
@@ -673,6 +897,52 @@ export default function App() {
     setSearchError(null);
   };
 
+  const startNavigation = () => {
+    const map = mapRef.current;
+    const point = lastPositionRef.current;
+
+    if (!map || !point || !routeRef.current || !destinationRef.current) return;
+
+    navigationActiveRef.current = true;
+    setNavigationActive(true);
+    setSearchOpen(false);
+    setRouteError(null);
+    followLocationRef.current = true;
+    offRouteCountRef.current = 0;
+    lastOffRouteDistanceRef.current = 0;
+    didInitialZoomRef.current = true;
+
+    if ((map.getZoom() ?? 0) < 17) {
+      map.setZoom(17);
+    }
+
+    routePolylineRef.current?.setOptions({
+      strokeWeight: 7,
+      strokeOpacity: 1
+    });
+
+    updateFollowCamera(
+      map,
+      point,
+      smoothedHeadingRef.current,
+      lastSpeedRef.current,
+      true
+    );
+  };
+
+  const endNavigation = () => {
+    navigationActiveRef.current = false;
+    setNavigationActive(false);
+    setRerouting(false);
+    offRouteCountRef.current = 0;
+    lastOffRouteDistanceRef.current = 0;
+    followLocationRef.current = false;
+
+    routePolylineRef.current?.setOptions({
+      strokeWeight: 6,
+      strokeOpacity: 0.95
+    });
+  };
 
   const recenter = () => {
     const map = mapRef.current;
@@ -727,6 +997,16 @@ export default function App() {
             ? "GPS unavailable"
             : "GPS error";
 
+  const displayedDistance =
+    navigationActive && remainingDistanceMeters !== null
+      ? remainingDistanceMeters
+      : route?.distanceMeters ?? null;
+
+  const displayedDuration =
+    navigationActive && remainingDurationSeconds !== null
+      ? remainingDurationSeconds
+      : route?.durationSeconds ?? null;
+
   return (
     <main className="map-shell" data-theme={theme}>
       <div ref={mapElementRef} className="map-canvas" />
@@ -736,11 +1016,11 @@ export default function App() {
         {gpsLabel}
       </div>
 
-      {!searchOpen ? (
+      {!navigationActive && !searchOpen ? (
         <button className="search-launch-button" type="button" onClick={openSearch} aria-label="Search destination">
           ⌕
         </button>
-      ) : (
+      ) : !navigationActive && searchOpen ? (
         <section className="search-panel">
           <div className="search-box">
             <span className="search-icon" aria-hidden="true">⌕</span>
@@ -784,9 +1064,9 @@ export default function App() {
             </div>
           )}
         </section>
-      )}
+      ) : null}
 
-      {destination && !searchOpen && (
+      {destination && !searchOpen && !navigationActive && (
         <button className="destination-chip" type="button" onClick={openSearch}>
           <span className="destination-dot" />
           <span className="destination-copy">
@@ -797,13 +1077,22 @@ export default function App() {
       )}
 
       {destination && !searchOpen && (
-        <section className="route-summary" aria-live="polite">
+        <section className="route-summary" data-navigation={navigationActive ? "active" : "preview"} aria-live="polite">
           {routeLoading ? (
             <span>Calculating route…</span>
-          ) : route ? (
+          ) : route && displayedDuration !== null && displayedDistance !== null ? (
             <>
-              <strong>{formatDuration(route.durationSeconds)}</strong>
-              <span>{formatDistance(route.distanceMeters)}</span>
+              <div className="route-stats">
+                <strong>{rerouting ? "Rerouting…" : formatDuration(displayedDuration)}</strong>
+                <span>{formatDistance(displayedDistance)}</span>
+              </div>
+              <button
+                className={navigationActive ? "route-action route-action-end" : "route-action"}
+                type="button"
+                onClick={navigationActive ? endNavigation : startNavigation}
+              >
+                {navigationActive ? "End" : "Start"}
+              </button>
             </>
           ) : routeError ? (
             <span>{routeError}</span>
