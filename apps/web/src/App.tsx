@@ -3,6 +3,7 @@ import { loadGoogleMaps } from "./googleMaps";
 
 type GpsState = "loading" | "live" | "denied" | "unavailable" | "error";
 type ThemeMode = "light" | "dark";
+type ArrivalState = "none" | "arriving" | "arrived";
 
 type PositionSample = {
   point: google.maps.LatLngLiteral;
@@ -53,6 +54,9 @@ const MIN_BEARING_DISTANCE_METERS = 8;
 const REROUTE_COOLDOWN_MS = 8000;
 const POOR_GPS_ACCURACY_METERS = 80;
 const PROGRESS_UI_MIN_MS = 750;
+const ARRIVING_ROUTE_METERS = 140;
+const ARRIVAL_CONFIRM_FIXES = 2;
+const ARRIVAL_NOTICE_MS = 6000;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -415,6 +419,8 @@ export default function App() {
   const lastRerouteAtRef = useRef(0);
   const offRouteCountRef = useRef(0);
   const lastOffRouteDistanceRef = useRef(0);
+  const arrivalConfirmCountRef = useRef(0);
+  const arrivalClearTimerRef = useRef<number | null>(null);
 
   const [theme] = useState<ThemeMode>(() => readTheme());
   const [gpsState, setGpsState] = useState<GpsState>("loading");
@@ -433,6 +439,7 @@ export default function App() {
   const [rerouting, setRerouting] = useState(false);
   const [remainingDistanceMeters, setRemainingDistanceMeters] = useState<number | null>(null);
   const [remainingDurationSeconds, setRemainingDurationSeconds] = useState<number | null>(null);
+  const [arrivalState, setArrivalState] = useState<ArrivalState>("none");
 
   const updateFollowCamera = (
     map: google.maps.Map,
@@ -611,6 +618,48 @@ export default function App() {
     }
   };
 
+  const completeArrival = () => {
+    if (!navigationActiveRef.current) return;
+
+    navigationActiveRef.current = false;
+    routeHeadingRef.current = null;
+    rerouteInFlightRef.current = false;
+    offRouteCountRef.current = 0;
+    lastOffRouteDistanceRef.current = 0;
+    arrivalConfirmCountRef.current = 0;
+
+    setNavigationActive(false);
+    setRerouting(false);
+    setArrivalState("arrived");
+    setRouteError(null);
+    setRemainingDistanceMeters(0);
+    setRemainingDurationSeconds(0);
+
+    followLocationRef.current = false;
+
+    routePolylineRef.current?.setMap(null);
+    routePathRef.current = [];
+    routeRef.current = null;
+    setRoute(null);
+
+    if (arrivalClearTimerRef.current !== null) {
+      window.clearTimeout(arrivalClearTimerRef.current);
+    }
+
+    arrivalClearTimerRef.current = window.setTimeout(() => {
+      destinationMarkerRef.current?.setMap(null);
+      destinationMarkerRef.current = null;
+      destinationRef.current = null;
+
+      setDestination(null);
+      setSearchQuery("");
+      setRouteError(null);
+      setArrivalState("none");
+
+      arrivalClearTimerRef.current = null;
+    }, ARRIVAL_NOTICE_MS);
+  };
+
   const updateNavigationProgress = (
     point: google.maps.LatLngLiteral,
     positionAccuracy: number,
@@ -647,6 +696,58 @@ export default function App() {
     const effectiveThreshold = poorGps
       ? Math.max(120, positionAccuracy * 1.2)
       : standardThreshold;
+
+    const destinationValue = destinationRef.current;
+
+    if (destinationValue) {
+      const directDistanceToDestination = distanceMeters(
+        point,
+        destinationValue.location
+      );
+
+      const arrivingThreshold = poorGps
+        ? Math.max(
+            ARRIVING_ROUTE_METERS,
+            Math.min(positionAccuracy * 1.2, 260)
+          )
+        : ARRIVING_ROUTE_METERS;
+
+      const arrivedDirectThreshold = poorGps
+        ? clamp(positionAccuracy * 0.65, 55, 90)
+        : clamp(positionAccuracy * 0.8, 35, 60);
+
+      const arrivedRouteThreshold = poorGps
+        ? clamp(positionAccuracy * 0.65, 70, 100)
+        : 45;
+
+      const nearArrival =
+        progress.remainingGeometryMeters <= arrivingThreshold ||
+        directDistanceToDestination <= arrivingThreshold;
+
+      if (nearArrival && arrivalState !== "arrived") {
+        setArrivalState("arriving");
+      } else if (!nearArrival && arrivalState === "arriving") {
+        setArrivalState("none");
+      }
+
+      const arrivalConfirmed =
+        progress.remainingGeometryMeters <= arrivedRouteThreshold &&
+        directDistanceToDestination <= arrivedDirectThreshold &&
+        progress.distanceFromRouteMeters <=
+          Math.max(effectiveThreshold, arrivedDirectThreshold) &&
+        speedMetersPerSecond <= 10;
+
+      if (arrivalConfirmed) {
+        arrivalConfirmCountRef.current += 1;
+      } else {
+        arrivalConfirmCountRef.current = 0;
+      }
+
+      if (arrivalConfirmCountRef.current >= ARRIVAL_CONFIRM_FIXES) {
+        completeArrival();
+        return;
+      }
+    }
 
     if (progress.distanceFromRouteMeters <= effectiveThreshold) {
       offRouteCountRef.current = 0;
@@ -877,6 +978,10 @@ export default function App() {
       destinationMarkerRef.current?.setMap(null);
       routePolylineRef.current?.setMap(null);
       accuracyCircleRef.current?.setMap(null);
+
+      if (arrivalClearTimerRef.current !== null) {
+        window.clearTimeout(arrivalClearTimerRef.current);
+      }
     };
   }, [theme]);
 
@@ -949,6 +1054,13 @@ export default function App() {
     const map = mapRef.current;
     if (!map) return;
 
+    if (arrivalClearTimerRef.current !== null) {
+      window.clearTimeout(arrivalClearTimerRef.current);
+      arrivalClearTimerRef.current = null;
+    }
+
+    arrivalConfirmCountRef.current = 0;
+    setArrivalState("none");
     setSearchLoading(true);
     setSearchError(null);
     setRouteError(null);
@@ -1032,6 +1144,13 @@ export default function App() {
 
     if (!map || !point || !routeRef.current || !destinationRef.current) return;
 
+    if (arrivalClearTimerRef.current !== null) {
+      window.clearTimeout(arrivalClearTimerRef.current);
+      arrivalClearTimerRef.current = null;
+    }
+
+    arrivalConfirmCountRef.current = 0;
+    setArrivalState("none");
     navigationActiveRef.current = true;
     routeHeadingRef.current = routeHeadingForPoint(
       point,
@@ -1066,6 +1185,8 @@ export default function App() {
   const endNavigation = () => {
     navigationActiveRef.current = false;
     routeHeadingRef.current = null;
+    arrivalConfirmCountRef.current = 0;
+    setArrivalState("none");
     setNavigationActive(false);
     setRerouting(false);
     offRouteCountRef.current = 0;
@@ -1165,7 +1286,23 @@ export default function App() {
         {gpsLabel}
       </div>
 
-      {navigationActive && activeStep && (
+      {arrivalState === "arrived" ? (
+        <section className="turn-card arrival-card" aria-live="assertive">
+          <span className="turn-icon arrival-icon" aria-hidden="true">✓</span>
+          <span className="turn-copy">
+            <strong>You have arrived</strong>
+            <small>{destination?.name ?? "Destination"}</small>
+          </span>
+        </section>
+      ) : navigationActive && arrivalState === "arriving" ? (
+        <section className="turn-card arrival-card" aria-live="polite">
+          <span className="turn-icon arrival-icon" aria-hidden="true">⚑</span>
+          <span className="turn-copy">
+            <strong>Arriving</strong>
+            <small>{destination?.name ?? "Destination"}</small>
+          </span>
+        </section>
+      ) : navigationActive && activeStep ? (
         <section className="turn-card" aria-live="polite">
           <span className="turn-icon" aria-hidden="true">
             {maneuverIcon(activeStep.maneuver)}
@@ -1175,7 +1312,7 @@ export default function App() {
             <small title={activeStep.instruction}>{activeStep.instruction}</small>
           </span>
         </section>
-      )}
+      ) : null}
 
       {!navigationActive && !searchOpen ? (
         <button className="search-launch-button" type="button" onClick={openSearch} aria-label="Search destination">

@@ -529,3 +529,17 @@ button {
     width: min(240px, calc(100vw - 88px));
   }
 }
+
+
+.arrival-card {
+  width: min(250px, calc(100vw - 96px));
+}
+
+.arrival-icon {
+  background: rgba(34, 197, 94, 0.18);
+  color: #7ee2a8;
+}
+
+.arrival-card strong {
+  color: #fff;
+}
