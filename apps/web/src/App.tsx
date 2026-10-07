@@ -95,6 +95,31 @@ function destinationPoint(
   };
 }
 
+function locationDotIcon(): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 9,
+    fillColor: "#2563EB",
+    fillOpacity: 1,
+    strokeColor: "#FFFFFF",
+    strokeOpacity: 1,
+    strokeWeight: 3.5
+  };
+}
+
+function navigationArrowIcon(heading: number): google.maps.Symbol {
+  return {
+    path: "M 0 -13 L 8.5 10 L 0 7 L -8.5 10 Z",
+    scale: 1,
+    fillColor: "#2563EB",
+    fillOpacity: 1,
+    strokeColor: "#FFFFFF",
+    strokeOpacity: 1,
+    strokeWeight: 2.2,
+    rotation: normalizeHeading(heading)
+  };
+}
+
 function readTheme(): ThemeMode {
   try {
     return localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
@@ -106,7 +131,7 @@ function readTheme(): ThemeMode {
 export default function App() {
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const locationDotRef = useRef<google.maps.Circle | null>(null);
+  const locationMarkerRef = useRef<google.maps.Marker | null>(null);
   const accuracyCircleRef = useRef<google.maps.Circle | null>(null);
   const lastPositionRef = useRef<google.maps.LatLngLiteral | null>(null);
   const previousSampleRef = useRef<PositionSample | null>(null);
@@ -276,28 +301,36 @@ export default function App() {
                 center: point,
                 radius: positionAccuracy,
                 clickable: false,
+                strokeColor: "#3B82F6",
                 strokeWeight: 1,
-                strokeOpacity: 0.18,
-                fillOpacity: 0.08
+                strokeOpacity: 0.28,
+                fillColor: "#60A5FA",
+                fillOpacity: 0.09,
+                zIndex: 1
               });
             } else {
               accuracyCircleRef.current.setCenter(point);
               accuracyCircleRef.current.setRadius(positionAccuracy);
             }
 
-            if (!locationDotRef.current) {
-              locationDotRef.current = new google.maps.Circle({
+            const heading = smoothedHeadingRef.current;
+            const showDirection = heading !== null && speed >= 1.5;
+            const markerIcon = showDirection
+              ? navigationArrowIcon(heading)
+              : locationDotIcon();
+
+            if (!locationMarkerRef.current) {
+              locationMarkerRef.current = new google.maps.Marker({
                 map,
-                center: point,
-                radius: 7,
+                position: point,
                 clickable: false,
-                strokeWeight: 3,
-                strokeOpacity: 1,
-                fillOpacity: 1,
-                zIndex: 2
+                optimized: true,
+                icon: markerIcon,
+                zIndex: 10
               });
             } else {
-              locationDotRef.current.setCenter(point);
+              locationMarkerRef.current.setPosition(point);
+              locationMarkerRef.current.setIcon(markerIcon);
             }
 
             updateFollowCamera(
@@ -330,7 +363,7 @@ export default function App() {
     return () => {
       cancelled = true;
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-      locationDotRef.current?.setMap(null);
+      locationMarkerRef.current?.setMap(null);
       accuracyCircleRef.current?.setMap(null);
     };
   }, [theme]);
