@@ -26,11 +26,18 @@ type PlaceSelection = {
   };
 };
 
+type RouteStep = {
+  distanceMeters: number;
+  maneuver: string;
+  instruction: string;
+};
+
 type RouteResult = {
   distanceMeters: number;
   durationSeconds: number;
   staticDurationSeconds: number | null;
   encodedPolyline: string;
+  steps: RouteStep[];
 };
 
 type RouteProgress = {
@@ -218,6 +225,50 @@ function formatDuration(seconds: number) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+function maneuverIcon(maneuver: string) {
+  const value = maneuver.toUpperCase();
+
+  if (value.includes("U_TURN")) return "↶";
+  if (value.includes("TURN_LEFT") || value.includes("RAMP_LEFT") || value.includes("FORK_LEFT")) return "←";
+  if (value.includes("TURN_RIGHT") || value.includes("RAMP_RIGHT") || value.includes("FORK_RIGHT")) return "→";
+  if (value.includes("SLIGHT_LEFT")) return "↖";
+  if (value.includes("SLIGHT_RIGHT")) return "↗";
+  if (value.includes("SHARP_LEFT")) return "↙";
+  if (value.includes("SHARP_RIGHT")) return "↘";
+  if (value.includes("ROUNDABOUT")) return "↻";
+  if (value.includes("MERGE")) return "↗";
+  return "↑";
+}
+
+function currentRouteStep(route: RouteResult | null, remainingDistanceMeters: number | null) {
+  if (!route || route.steps.length === 0) return null;
+
+  const remaining =
+    remainingDistanceMeters === null
+      ? route.distanceMeters
+      : clamp(remainingDistanceMeters, 0, route.distanceMeters);
+
+  const traveled = Math.max(0, route.distanceMeters - remaining);
+  let cumulative = 0;
+
+  for (const step of route.steps) {
+    cumulative += step.distanceMeters;
+
+    if (traveled <= cumulative) {
+      return {
+        ...step,
+        distanceToManeuverMeters: Math.max(0, cumulative - traveled)
+      };
+    }
+  }
+
+  const last = route.steps[route.steps.length - 1];
+  return {
+    ...last,
+    distanceToManeuverMeters: 0
+  };
 }
 
 function createSearchSessionToken() {
@@ -1007,6 +1058,10 @@ export default function App() {
       ? remainingDurationSeconds
       : route?.durationSeconds ?? null;
 
+  const activeStep = navigationActive
+    ? currentRouteStep(route, remainingDistanceMeters)
+    : null;
+
   return (
     <main className="map-shell" data-theme={theme}>
       <div ref={mapElementRef} className="map-canvas" />
@@ -1015,6 +1070,18 @@ export default function App() {
         <span className="status-dot" />
         {gpsLabel}
       </div>
+
+      {navigationActive && activeStep && (
+        <section className="turn-card" aria-live="polite">
+          <span className="turn-icon" aria-hidden="true">
+            {maneuverIcon(activeStep.maneuver)}
+          </span>
+          <span className="turn-copy">
+            <strong>{formatDistance(activeStep.distanceToManeuverMeters)}</strong>
+            <small title={activeStep.instruction}>{activeStep.instruction}</small>
+          </span>
+        </section>
+      )}
 
       {!navigationActive && !searchOpen ? (
         <button className="search-launch-button" type="button" onClick={openSearch} aria-label="Search destination">
