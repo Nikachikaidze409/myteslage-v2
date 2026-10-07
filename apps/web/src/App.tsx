@@ -291,6 +291,50 @@ function readTheme(): ThemeMode {
   }
 }
 
+function routeHeadingForPoint(
+  point: google.maps.LatLngLiteral,
+  path: google.maps.LatLngLiteral[]
+): number | null {
+  if (path.length < 2) return null;
+
+  const earthRadius = 6371000;
+  const latScale = earthRadius * (Math.PI / 180);
+  const lngScale =
+    earthRadius * Math.cos(toRadians(point.lat)) * (Math.PI / 180);
+
+  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestHeading: number | null = null;
+
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const a = path[index];
+    const b = path[index + 1];
+
+    const ax = (a.lng - point.lng) * lngScale;
+    const ay = (a.lat - point.lat) * latScale;
+    const bx = (b.lng - point.lng) * lngScale;
+    const by = (b.lat - point.lat) * latScale;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    const denominator = dx * dx + dy * dy;
+    const t =
+      denominator === 0
+        ? 0
+        : clamp(-(ax * dx + ay * dy) / denominator, 0, 1);
+
+    const px = ax + dx * t;
+    const py = ay + dy * t;
+    const distance = Math.hypot(px, py);
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestHeading = bearingDegrees(a, b);
+    }
+  }
+
+  return bestHeading;
+}
+
 function routeProgress(
   point: google.maps.LatLngLiteral,
   path: google.maps.LatLngLiteral[]
@@ -355,6 +399,7 @@ export default function App() {
   const lastPositionRef = useRef<google.maps.LatLngLiteral | null>(null);
   const previousSampleRef = useRef<PositionSample | null>(null);
   const smoothedHeadingRef = useRef<number | null>(null);
+  const routeHeadingRef = useRef<number | null>(null);
   const lastSpeedRef = useRef(0);
   const lastCameraUpdateRef = useRef(0);
   const lastProgressUiUpdateRef = useRef(0);
@@ -541,10 +586,19 @@ export default function App() {
 
       if (map) {
         followLocationRef.current = true;
+        const heading =
+          routeHeadingForPoint(origin, routePathRef.current) ??
+          routeHeadingRef.current ??
+          smoothedHeadingRef.current;
+
+        if (heading !== null) {
+          routeHeadingRef.current = heading;
+        }
+
         updateFollowCamera(
           map,
           origin,
-          smoothedHeadingRef.current,
+          heading,
           lastSpeedRef.current,
           true
         );
@@ -741,10 +795,34 @@ export default function App() {
               accuracyCircleRef.current.setRadius(positionAccuracy);
             }
 
-            const heading = smoothedHeadingRef.current;
-            const showDirection = heading !== null && speed >= 1.5;
+            const gpsHeading = smoothedHeadingRef.current;
+            let cameraHeading = gpsHeading;
+
+            if (navigationActiveRef.current && routePathRef.current.length >= 2) {
+              const routeHeading = routeHeadingForPoint(
+                point,
+                routePathRef.current
+              );
+
+              if (routeHeading !== null) {
+                routeHeadingRef.current = smoothHeading(
+                  routeHeadingRef.current,
+                  routeHeading,
+                  0.45
+                );
+                cameraHeading = routeHeadingRef.current;
+              }
+            }
+
+            const showDirection =
+              (navigationActiveRef.current && cameraHeading !== null) ||
+              (gpsHeading !== null && speed >= 1.5);
+
             const markerHeading =
-              navigationActiveRef.current && vectorHeadingRef.current ? 0 : heading ?? 0;
+              navigationActiveRef.current && vectorHeadingRef.current
+                ? 0
+                : cameraHeading ?? 0;
+
             const markerIcon = showDirection
               ? navigationArrowIcon(markerHeading)
               : locationDotIcon();
@@ -766,7 +844,7 @@ export default function App() {
             updateFollowCamera(
               map,
               point,
-              smoothedHeadingRef.current,
+              cameraHeading,
               speed
             );
 
@@ -955,6 +1033,10 @@ export default function App() {
     if (!map || !point || !routeRef.current || !destinationRef.current) return;
 
     navigationActiveRef.current = true;
+    routeHeadingRef.current = routeHeadingForPoint(
+      point,
+      routePathRef.current
+    );
     setNavigationActive(true);
     setSearchOpen(false);
     setRouteError(null);
@@ -975,7 +1057,7 @@ export default function App() {
     updateFollowCamera(
       map,
       point,
-      smoothedHeadingRef.current,
+      routeHeadingRef.current ?? smoothedHeadingRef.current,
       lastSpeedRef.current,
       true
     );
@@ -983,6 +1065,7 @@ export default function App() {
 
   const endNavigation = () => {
     navigationActiveRef.current = false;
+    routeHeadingRef.current = null;
     setNavigationActive(false);
     setRerouting(false);
     offRouteCountRef.current = 0;
@@ -1002,10 +1085,21 @@ export default function App() {
     followLocationRef.current = true;
 
     if (map && point) {
+      const heading =
+        navigationActiveRef.current && routePathRef.current.length >= 2
+          ? routeHeadingForPoint(point, routePathRef.current) ??
+            routeHeadingRef.current ??
+            smoothedHeadingRef.current
+          : smoothedHeadingRef.current;
+
+      if (navigationActiveRef.current && heading !== null) {
+        routeHeadingRef.current = heading;
+      }
+
       updateFollowCamera(
         map,
         point,
-        smoothedHeadingRef.current,
+        heading,
         lastSpeedRef.current,
         true
       );
