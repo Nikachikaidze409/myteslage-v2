@@ -2,8 +2,106 @@ import { useEffect, useRef, useState } from "react";
 import { loadGoogleMaps } from "./googleMaps";
 
 type GpsState = "loading" | "live" | "denied" | "unavailable" | "error";
+type ThemeMode = "light" | "dark";
+
+type PositionSample = {
+  point: google.maps.LatLngLiteral;
+  timestamp: number;
+};
 
 const TBILISI = { lat: 41.7151, lng: 44.8271 };
+const THEME_STORAGE_KEY = "tmap-theme";
+const CAMERA_UPDATE_MIN_MS = 250;
+const MIN_BEARING_DISTANCE_METERS = 8;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function toRadians(value: number) {
+  return (value * Math.PI) / 180;
+}
+
+function toDegrees(value: number) {
+  return (value * 180) / Math.PI;
+}
+
+function normalizeHeading(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function shortestHeadingDelta(from: number, to: number) {
+  return ((to - from + 540) % 360) - 180;
+}
+
+function smoothHeading(previous: number | null, next: number, alpha = 0.3) {
+  if (previous === null) return normalizeHeading(next);
+  return normalizeHeading(previous + shortestHeadingDelta(previous, next) * alpha);
+}
+
+function distanceMeters(a: google.maps.LatLngLiteral, b: google.maps.LatLngLiteral) {
+  const earthRadius = 6371000;
+  const dLat = toRadians(b.lat - a.lat);
+  const dLng = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+
+  return 2 * earthRadius * Math.asin(Math.sqrt(h));
+}
+
+function bearingDegrees(a: google.maps.LatLngLiteral, b: google.maps.LatLngLiteral) {
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const dLng = toRadians(b.lng - a.lng);
+
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+  return normalizeHeading(toDegrees(Math.atan2(y, x)));
+}
+
+function destinationPoint(
+  start: google.maps.LatLngLiteral,
+  heading: number,
+  distance: number
+): google.maps.LatLngLiteral {
+  const earthRadius = 6371000;
+  const angularDistance = distance / earthRadius;
+  const bearing = toRadians(heading);
+  const lat1 = toRadians(start.lat);
+  const lng1 = toRadians(start.lng);
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance) +
+      Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing)
+  );
+
+  const lng2 =
+    lng1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+      Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2)
+    );
+
+  return {
+    lat: toDegrees(lat2),
+    lng: normalizeHeading(toDegrees(lng2) + 180) - 180
+  };
+}
+
+function readTheme(): ThemeMode {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) === "dark" ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+}
 
 export default function App() {
   const mapElementRef = useRef<HTMLDivElement | null>(null);
@@ -11,11 +109,59 @@ export default function App() {
   const locationDotRef = useRef<google.maps.Circle | null>(null);
   const accuracyCircleRef = useRef<google.maps.Circle | null>(null);
   const lastPositionRef = useRef<google.maps.LatLngLiteral | null>(null);
+  const previousSampleRef = useRef<PositionSample | null>(null);
+  const smoothedHeadingRef = useRef<number | null>(null);
+  const lastSpeedRef = useRef(0);
+  const lastCameraUpdateRef = useRef(0);
   const followLocationRef = useRef(true);
+  const vectorHeadingRef = useRef(true);
+  const didInitialZoomRef = useRef(false);
 
+  const [theme] = useState<ThemeMode>(() => readTheme());
   const [gpsState, setGpsState] = useState<GpsState>("loading");
   const [accuracy, setAccuracy] = useState<number | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
+
+  const updateFollowCamera = (
+    map: google.maps.Map,
+    point: google.maps.LatLngLiteral,
+    heading: number | null,
+    speedMetersPerSecond: number,
+    force = false
+  ) => {
+    if (!followLocationRef.current) return;
+
+    const now = performance.now();
+    if (!force && now - lastCameraUpdateRef.current < CAMERA_UPDATE_MIN_MS) return;
+    lastCameraUpdateRef.current = now;
+
+    if (!didInitialZoomRef.current) {
+      if ((map.getZoom() ?? 0) < 16) map.setZoom(16);
+      didInitialZoomRef.current = true;
+    }
+
+    const canRotate = vectorHeadingRef.current && heading !== null;
+    const currentZoom = map.getZoom() ?? 16;
+
+    if (canRotate) {
+      const lookAheadMeters = clamp(45 + speedMetersPerSecond * 4, 45, 115);
+      const cameraCenter = destinationPoint(point, heading, lookAheadMeters);
+
+      map.moveCamera({
+        center: cameraCenter,
+        zoom: currentZoom,
+        heading,
+        tilt: 0
+      });
+    } else {
+      map.moveCamera({
+        center: point,
+        zoom: currentZoom,
+        heading: 0,
+        tilt: 0
+      });
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -38,9 +184,15 @@ export default function App() {
           ...(mapId ? { mapId } : {}),
           zoom: 13,
           mapTypeId: google.maps.MapTypeId.ROADMAP,
-          renderingType: google.maps.RenderingType.RASTER,
+          renderingType: google.maps.RenderingType.VECTOR,
+          colorScheme:
+            theme === "dark"
+              ? google.maps.ColorScheme.DARK
+              : google.maps.ColorScheme.LIGHT,
           tilt: 0,
           heading: 0,
+          tiltInteractionEnabled: false,
+          headingInteractionEnabled: false,
           disableDefaultUI: true,
           gestureHandling: "greedy",
           keyboardShortcuts: false,
@@ -53,13 +205,13 @@ export default function App() {
 
         mapRef.current = map;
 
-        // Keep the map permanently flat/top-down.
-        map.addListener("tilt_changed", () => {
-          if ((map.getTilt() ?? 0) !== 0) map.setTilt(0);
+        google.maps.event.addListenerOnce(map, "tilesloaded", () => {
+          vectorHeadingRef.current =
+            map.getRenderingType() === google.maps.RenderingType.VECTOR;
         });
 
-        map.addListener("heading_changed", () => {
-          if ((map.getHeading() ?? 0) !== 0) map.setHeading(0);
+        map.addListener("tilt_changed", () => {
+          if ((map.getTilt() ?? 0) !== 0) map.setTilt(0);
         });
 
         map.addListener("dragstart", () => {
@@ -78,8 +230,43 @@ export default function App() {
               lng: position.coords.longitude
             };
             const positionAccuracy = Math.max(position.coords.accuracy || 0, 1);
+            const speed = Math.max(position.coords.speed ?? 0, 0);
+            const previousSample = previousSampleRef.current;
+
+            let rawHeading: number | null = null;
+
+            if (
+              Number.isFinite(position.coords.heading) &&
+              position.coords.heading !== null &&
+              speed >= 1.5
+            ) {
+              rawHeading = normalizeHeading(position.coords.heading);
+            } else if (previousSample) {
+              const moved = distanceMeters(previousSample.point, point);
+              const requiredMovement = Math.max(
+                MIN_BEARING_DISTANCE_METERS,
+                Math.min(positionAccuracy * 0.25, 25)
+              );
+
+              if (moved >= requiredMovement) {
+                rawHeading = bearingDegrees(previousSample.point, point);
+              }
+            }
+
+            if (rawHeading !== null) {
+              smoothedHeadingRef.current = smoothHeading(
+                smoothedHeadingRef.current,
+                rawHeading
+              );
+            }
 
             lastPositionRef.current = point;
+            previousSampleRef.current = {
+              point,
+              timestamp: position.timestamp
+            };
+            lastSpeedRef.current = speed;
+
             setAccuracy(Math.round(positionAccuracy));
             setGpsState("live");
 
@@ -90,8 +277,8 @@ export default function App() {
                 radius: positionAccuracy,
                 clickable: false,
                 strokeWeight: 1,
-                strokeOpacity: 0.2,
-                fillOpacity: 0.1
+                strokeOpacity: 0.18,
+                fillOpacity: 0.08
               });
             } else {
               accuracyCircleRef.current.setCenter(point);
@@ -113,10 +300,12 @@ export default function App() {
               locationDotRef.current.setCenter(point);
             }
 
-            if (followLocationRef.current) {
-              map.panTo(point);
-              if ((map.getZoom() ?? 0) < 16) map.setZoom(16);
-            }
+            updateFollowCamera(
+              map,
+              point,
+              smoothedHeadingRef.current,
+              speed
+            );
           },
           (error) => {
             if (error.code === error.PERMISSION_DENIED) {
@@ -144,7 +333,7 @@ export default function App() {
       locationDotRef.current?.setMap(null);
       accuracyCircleRef.current?.setMap(null);
     };
-  }, []);
+  }, [theme]);
 
   const recenter = () => {
     const map = mapRef.current;
@@ -153,10 +342,13 @@ export default function App() {
     followLocationRef.current = true;
 
     if (map && point) {
-      map.setTilt(0);
-      map.setHeading(0);
-      map.panTo(point);
-      if ((map.getZoom() ?? 0) < 16) map.setZoom(16);
+      updateFollowCamera(
+        map,
+        point,
+        smoothedHeadingRef.current,
+        lastSpeedRef.current,
+        true
+      );
     }
   };
 
@@ -165,28 +357,42 @@ export default function App() {
     if (!map) return;
 
     map.setTilt(0);
-    map.setHeading(0);
     map.setZoom(Math.max(2, Math.min(21, (map.getZoom() ?? 13) + delta)));
   };
+
+  const toggleTheme = () => {
+    const nextTheme: ThemeMode = theme === "light" ? "dark" : "light";
+
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    } catch {
+      // Storage may be unavailable in restricted browser modes.
+    }
+
+    window.location.reload();
+  };
+
+  const gpsQuality =
+    accuracy === null ? "unknown" : accuracy <= 35 ? "good" : accuracy <= 80 ? "fair" : "poor";
 
   const gpsLabel =
     gpsState === "live"
       ? accuracy
-        ? `GPS accuracy ±${accuracy}m`
-        : "GPS live"
+        ? `GPS ${accuracy}m`
+        : "GPS"
       : gpsState === "loading"
-        ? "Finding location…"
+        ? "GPS…"
         : gpsState === "denied"
-          ? "Location blocked"
+          ? "GPS blocked"
           : gpsState === "unavailable"
             ? "GPS unavailable"
             : "GPS error";
 
   return (
-    <main className="map-shell">
+    <main className="map-shell" data-theme={theme}>
       <div ref={mapElementRef} className="map-canvas" />
 
-      <div className="status-pill" data-state={gpsState}>
+      <div className="status-pill" data-state={gpsState} data-quality={gpsQuality}>
         <span className="status-dot" />
         {gpsLabel}
       </div>
@@ -200,9 +406,17 @@ export default function App() {
         </button>
       </div>
 
-      <button className="location-button" type="button" onClick={recenter}>
+      <button
+        className="theme-button"
+        type="button"
+        onClick={toggleTheme}
+        aria-label={theme === "light" ? "Switch to dark map" : "Switch to light map"}
+      >
+        {theme === "light" ? "☾" : "☀"}
+      </button>
+
+      <button className="location-button" type="button" onClick={recenter} aria-label="Follow my location">
         <span className="location-icon" aria-hidden="true">⌖</span>
-        My Location
       </button>
 
       {mapError && (
