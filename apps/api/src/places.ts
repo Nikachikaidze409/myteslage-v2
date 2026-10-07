@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 
 export type PlaceSuggestion = {
   placeId: string;
