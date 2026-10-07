@@ -41,100 +41,108 @@ button {
   inset: 0;
 }
 
+.status-pill,
+.map-button,
+.theme-button,
+.location-button {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(20, 22, 26, 0.92);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+}
+
 .status-pill {
   position: absolute;
-  top: 20px;
-  left: 20px;
+  top: 12px;
+  left: 12px;
   z-index: 10;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  min-height: 42px;
-  padding: 0 15px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
   border-radius: 999px;
-  background: rgba(18, 20, 24, 0.9);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 650;
-  backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .status-dot {
-  width: 9px;
-  height: 9px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: #a1a1aa;
 }
 
-.status-pill[data-state="live"] .status-dot {
+.status-pill[data-state="live"][data-quality="good"] .status-dot {
   background: #39d353;
 }
 
+.status-pill[data-state="live"][data-quality="fair"] .status-dot {
+  background: #f0c419;
+}
+
+.status-pill[data-state="live"][data-quality="poor"] .status-dot,
 .status-pill[data-state="denied"] .status-dot,
 .status-pill[data-state="error"] .status-dot {
-  background: #ff5b5b;
+  background: #ff6b5f;
 }
 
 .map-controls {
   position: absolute;
   z-index: 10;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .map-controls-right {
-  top: 20px;
-  right: 20px;
+  right: 12px;
+  bottom: 66px;
 }
 
 .map-button,
+.theme-button,
 .location-button {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(18, 20, 24, 0.92);
-  color: #fff;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(12px);
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border-radius: 12px;
   cursor: pointer;
+  user-select: none;
 }
 
 .map-button {
-  width: 52px;
-  height: 52px;
-  border-radius: 15px;
-  font-size: 27px;
+  font-size: 23px;
   font-weight: 500;
+  line-height: 1;
 }
 
-.map-button.text-button {
-  font-size: 15px;
-  font-weight: 750;
-  letter-spacing: 0.02em;
-}
-
-.map-button:active,
-.location-button:active {
-  transform: scale(0.97);
+.theme-button {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 10;
+  font-size: 20px;
 }
 
 .location-button {
   position: absolute;
-  right: 20px;
-  bottom: 24px;
+  right: 12px;
+  bottom: 12px;
   z-index: 10;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 54px;
-  padding: 0 18px;
-  border-radius: 16px;
-  font-weight: 700;
 }
 
 .location-icon {
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1;
+}
+
+.map-button:active,
+.theme-button:active,
+.location-button:active {
+  transform: scale(0.96);
 }
 
 .map-error {
@@ -145,13 +153,13 @@ button {
   display: grid;
   gap: 8px;
   width: min(430px, calc(100% - 40px));
-  padding: 22px;
+  padding: 20px;
   transform: translate(-50%, -50%);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 18px;
-  background: rgba(18, 20, 24, 0.96);
+  border-radius: 16px;
+  background: rgba(18, 20, 24, 0.97);
   color: #fff;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
 }
 
 .map-error strong {
@@ -165,17 +173,22 @@ button {
 
 @media (max-width: 700px) {
   .status-pill {
-    top: 12px;
-    left: 12px;
+    top: 8px;
+    left: 8px;
   }
 
   .map-controls-right {
-    top: 12px;
-    right: 12px;
+    right: 8px;
+    bottom: 60px;
+  }
+
+  .theme-button {
+    left: 8px;
+    bottom: 8px;
   }
 
   .location-button {
-    right: 12px;
-    bottom: 16px;
+    right: 8px;
+    bottom: 8px;
   }
 }
