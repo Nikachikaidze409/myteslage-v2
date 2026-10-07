@@ -4,6 +4,27 @@ import { autocompletePlaces, getPlaceDetails } from "./places.js";
 
 const app = Fastify({ logger: true });
 
+const searchRateLimit = new Map<string, { windowStart: number; count: number }>();
+const SEARCH_RATE_WINDOW_MS = 60_000;
+const SEARCH_RATE_MAX = 40;
+
+function allowSearchRequest(ip: string) {
+  const now = Date.now();
+  const current = searchRateLimit.get(ip);
+
+  if (!current || now - current.windowStart >= SEARCH_RATE_WINDOW_MS) {
+    searchRateLimit.set(ip, { windowStart: now, count: 1 });
+    return true;
+  }
+
+  if (current.count >= SEARCH_RATE_MAX) {
+    return false;
+  }
+
+  current.count += 1;
+  return true;
+}
+
 await app.register(cors, {
   origin: false
 });
@@ -27,6 +48,12 @@ app.post<{
     lng?: number;
   };
 }>("/api/v1/places/autocomplete", async (request, reply) => {
+  if (!allowSearchRequest(request.ip)) {
+    return reply.code(429).send({
+      error: "Too many search requests. Please wait a moment."
+    });
+  }
+
   const input = request.body?.input?.trim() ?? "";
   const sessionToken = request.body?.sessionToken?.trim() ?? "";
   const lat = request.body?.lat;
