@@ -48,6 +48,7 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         VITE_GOOGLE_MAPS_BROWSER_API_KEY: ${VITE_GOOGLE_MAPS_BROWSER_API_KEY}
+        VITE_GOOGLE_MAPS_MAP_ID: ${VITE_GOOGLE_MAPS_MAP_ID:-}
     image: myteslage-web:local
     restart: unless-stopped
     ports:
