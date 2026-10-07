@@ -26,6 +26,13 @@ type PlaceSelection = {
   };
 };
 
+type RouteResult = {
+  distanceMeters: number;
+  durationSeconds: number;
+  staticDurationSeconds: number | null;
+  encodedPolyline: string;
+};
+
 const TBILISI = { lat: 41.7151, lng: 44.8271 };
 const THEME_STORAGE_KEY = "tmap-theme";
 const CAMERA_UPDATE_MIN_MS = 250;
@@ -150,6 +157,60 @@ function destinationIcon(): google.maps.Symbol {
   };
 }
 
+function decodePolyline(encoded: string): google.maps.LatLngLiteral[] {
+  const path: google.maps.LatLngLiteral[] = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+
+  while (index < encoded.length) {
+    let result = 0;
+    let shift = 0;
+    let byte = 0;
+
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    const deltaLat = result & 1 ? ~(result >> 1) : result >> 1;
+    lat += deltaLat;
+
+    result = 0;
+    shift = 0;
+
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    const deltaLng = result & 1 ? ~(result >> 1) : result >> 1;
+    lng += deltaLng;
+
+    path.push({
+      lat: lat / 1e5,
+      lng: lng / 1e5
+    });
+  }
+
+  return path;
+}
+
+function formatDistance(meters: number) {
+  if (meters < 1000) return `${Math.max(1, Math.round(meters))} m`;
+  return `${(meters / 1000).toFixed(meters < 10000 ? 1 : 0)} km`;
+}
+
+function formatDuration(seconds: number) {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
 function createSearchSessionToken() {
   try {
     if (typeof crypto.randomUUID === "function") {
@@ -175,6 +236,7 @@ export default function App() {
   const mapRef = useRef<google.maps.Map | null>(null);
   const locationMarkerRef = useRef<google.maps.Marker | null>(null);
   const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
+  const routePolylineRef = useRef<google.maps.Polyline | null>(null);
   const accuracyCircleRef = useRef<google.maps.Circle | null>(null);
   const lastPositionRef = useRef<google.maps.LatLngLiteral | null>(null);
   const previousSampleRef = useRef<PositionSample | null>(null);
@@ -196,6 +258,9 @@ export default function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
   const [destination, setDestination] = useState<PlaceSelection | null>(null);
+  const [route, setRoute] = useState<RouteResult | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
 
   const updateFollowCamera = (
     map: google.maps.Map,
@@ -415,6 +480,7 @@ export default function App() {
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
       locationMarkerRef.current?.setMap(null);
       destinationMarkerRef.current?.setMap(null);
+      routePolylineRef.current?.setMap(null);
       accuracyCircleRef.current?.setMap(null);
     };
   }, [theme]);
@@ -513,23 +579,82 @@ export default function App() {
         zIndex: 9
       });
 
-      followLocationRef.current = false;
-      map.moveCamera({
-        center: selected.location,
-        zoom: Math.max(map.getZoom() ?? 15, 15),
-        heading: 0,
-        tilt: 0
-      });
-
       setDestination(selected);
       setSearchQuery(selected.name);
       setSuggestions([]);
       setSearchOpen(false);
       searchSessionTokenRef.current = createSearchSessionToken();
+
+      const origin = lastPositionRef.current;
+
+      if (!origin) {
+        followLocationRef.current = false;
+        map.moveCamera({
+          center: selected.location,
+          zoom: Math.max(map.getZoom() ?? 15, 15),
+          heading: 0,
+          tilt: 0
+        });
+        setRoute(null);
+        setRouteError("Waiting for GPS before calculating route");
+        return;
+      }
+
+      setRouteLoading(true);
+      setRouteError(null);
+
+      const routeResponse = await fetch("/api/v1/routes/compute", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          origin,
+          destination: selected.location
+        })
+      });
+
+      if (!routeResponse.ok) {
+        throw new Error("Route request failed");
+      }
+
+      const routeData = (await routeResponse.json()) as RouteResult;
+      const routePath = decodePolyline(routeData.encodedPolyline);
+
+      routePolylineRef.current?.setMap(null);
+      routePolylineRef.current = new google.maps.Polyline({
+        map,
+        path: routePath,
+        clickable: false,
+        geodesic: false,
+        strokeColor: "#2563EB",
+        strokeOpacity: 0.95,
+        strokeWeight: 6,
+        zIndex: 7
+      });
+
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend(origin);
+      bounds.extend(selected.location);
+      for (const point of routePath) bounds.extend(point);
+
+      followLocationRef.current = false;
+      map.fitBounds(bounds, {
+        top: 80,
+        right: 70,
+        bottom: 110,
+        left: 70
+      });
+
+      map.setTilt(0);
+      map.setHeading(0);
+      setRoute(routeData);
     } catch {
       setSearchError("Could not open this destination");
+      setRouteError("Route is temporarily unavailable");
     } finally {
       setSearchLoading(false);
+      setRouteLoading(false);
     }
   };
 
@@ -669,6 +794,21 @@ export default function App() {
             {destination.address && <small>{destination.address}</small>}
           </span>
         </button>
+      )}
+
+      {destination && !searchOpen && (
+        <section className="route-summary" aria-live="polite">
+          {routeLoading ? (
+            <span>Calculating route…</span>
+          ) : route ? (
+            <>
+              <strong>{formatDuration(route.durationSeconds)}</strong>
+              <span>{formatDistance(route.distanceMeters)}</span>
+            </>
+          ) : routeError ? (
+            <span>{routeError}</span>
+          ) : null}
+        </section>
       )}
 
       <div className="map-controls map-controls-right">
