@@ -22,6 +22,7 @@ export default function App() {
     let watchId: number | null = null;
 
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_BROWSER_API_KEY?.trim();
+    const mapId = import.meta.env.VITE_GOOGLE_MAPS_MAP_ID?.trim();
 
     if (!apiKey) {
       setMapError("Google Maps browser key is missing.");
@@ -34,6 +35,7 @@ export default function App() {
 
         const map = new google.maps.Map(mapElementRef.current, {
           center: TBILISI,
+          ...(mapId ? { mapId } : {}),
           zoom: 13,
           mapTypeId: google.maps.MapTypeId.ROADMAP,
           renderingType: google.maps.RenderingType.RASTER,
