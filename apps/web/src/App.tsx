@@ -15,7 +15,6 @@ export default function App() {
 
   const [gpsState, setGpsState] = useState<GpsState>("loading");
   const [accuracy, setAccuracy] = useState<number | null>(null);
-  const [is3d, setIs3d] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -36,6 +35,10 @@ export default function App() {
         const map = new google.maps.Map(mapElementRef.current, {
           center: TBILISI,
           zoom: 13,
+          mapTypeId: google.maps.MapTypeId.ROADMAP,
+          renderingType: google.maps.RenderingType.RASTER,
+          tilt: 0,
+          heading: 0,
           disableDefaultUI: true,
           gestureHandling: "greedy",
           keyboardShortcuts: false,
@@ -47,6 +50,15 @@ export default function App() {
         });
 
         mapRef.current = map;
+
+        // Keep the map permanently flat/top-down.
+        map.addListener("tilt_changed", () => {
+          if ((map.getTilt() ?? 0) !== 0) map.setTilt(0);
+        });
+
+        map.addListener("heading_changed", () => {
+          if ((map.getHeading() ?? 0) !== 0) map.setHeading(0);
+        });
 
         map.addListener("dragstart", () => {
           followLocationRef.current = false;
@@ -139,6 +151,8 @@ export default function App() {
     followLocationRef.current = true;
 
     if (map && point) {
+      map.setTilt(0);
+      map.setHeading(0);
       map.panTo(point);
       if ((map.getZoom() ?? 0) < 16) map.setZoom(16);
     }
@@ -147,22 +161,16 @@ export default function App() {
   const zoomBy = (delta: number) => {
     const map = mapRef.current;
     if (!map) return;
+
+    map.setTilt(0);
+    map.setHeading(0);
     map.setZoom(Math.max(2, Math.min(21, (map.getZoom() ?? 13) + delta)));
-  };
-
-  const toggle3d = () => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const next3d = !is3d;
-    map.setTilt(next3d ? 45 : 0);
-    setIs3d(next3d);
   };
 
   const gpsLabel =
     gpsState === "live"
       ? accuracy
-        ? `GPS ±${accuracy}m`
+        ? `GPS accuracy ±${accuracy}m`
         : "GPS live"
       : gpsState === "loading"
         ? "Finding location…"
@@ -182,9 +190,6 @@ export default function App() {
       </div>
 
       <div className="map-controls map-controls-right">
-        <button className="map-button text-button" type="button" onClick={toggle3d}>
-          {is3d ? "2D" : "3D"}
-        </button>
         <button className="map-button" type="button" onClick={() => zoomBy(1)} aria-label="Zoom in">
           +
         </button>
