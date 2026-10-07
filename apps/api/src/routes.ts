@@ -6,11 +6,18 @@ export type RoutePoint = {
   lng: number;
 };
 
+export type RouteStep = {
+  distanceMeters: number;
+  maneuver: string;
+  instruction: string;
+};
+
 export type RouteResult = {
   distanceMeters: number;
   durationSeconds: number;
   staticDurationSeconds: number | null;
   encodedPolyline: string;
+  steps: RouteStep[];
 };
 
 type RouteInput = {
@@ -69,7 +76,7 @@ function routeCacheKey(input: RouteInput) {
     rounded(input.destination.lng, 5)
   ].join(":");
 
-  return `routes:v1:${compactHash(key)}`;
+  return `routes:v2:${compactHash(key)}`;
 }
 
 function parseDurationSeconds(value?: string) {
@@ -92,7 +99,7 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask":
-          "routes.distanceMeters,routes.duration,routes.staticDuration,routes.polyline.encodedPolyline"
+          "routes.distanceMeters,routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.legs.steps.distanceMeters,routes.legs.steps.navigationInstruction"
       },
       body: JSON.stringify({
         origin: {
@@ -115,7 +122,9 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
         routingPreference: "TRAFFIC_UNAWARE",
         polylineQuality: "OVERVIEW",
         polylineEncoding: "ENCODED_POLYLINE",
-        computeAlternativeRoutes: false
+        computeAlternativeRoutes: false,
+        languageCode: "ka",
+        units: "METRIC"
       })
     }
   );
@@ -135,6 +144,15 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
       polyline?: {
         encodedPolyline?: string;
       };
+      legs?: Array<{
+        steps?: Array<{
+          distanceMeters?: number;
+          navigationInstruction?: {
+            maneuver?: string;
+            instructions?: string;
+          };
+        }>;
+      }>;
     }>;
   };
 
@@ -144,13 +162,25 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
     throw new Error("Routes response did not include a usable route");
   }
 
+  const steps: RouteStep[] = (route.legs ?? [])
+    .flatMap((leg) => leg.steps ?? [])
+    .map((step) => ({
+      distanceMeters: Math.max(0, Number(step.distanceMeters ?? 0)),
+      maneuver: step.navigationInstruction?.maneuver ?? "STRAIGHT",
+      instruction:
+        step.navigationInstruction?.instructions ??
+        "Continue on the current road"
+    }))
+    .filter((step) => step.distanceMeters > 0 || step.instruction.length > 0);
+
   return {
     distanceMeters: route.distanceMeters,
     durationSeconds: parseDurationSeconds(route.duration),
     staticDurationSeconds: route.staticDuration
       ? parseDurationSeconds(route.staticDuration)
       : null,
-    encodedPolyline: route.polyline.encodedPolyline
+    encodedPolyline: route.polyline.encodedPolyline,
+    steps
   };
 }
 
