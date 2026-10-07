@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { autocompletePlaces, getPlaceDetails } from "./places.js";
+import { computeRoute } from "./routes.js";
 
 const app = Fastify({ logger: true });
 
@@ -97,6 +98,41 @@ app.post<{
     return reply.code(502).send({
       error: "Place search is temporarily unavailable."
     });
+  }
+});
+
+app.post<{
+  Body: {
+    origin?: { lat?: number; lng?: number };
+    destination?: { lat?: number; lng?: number };
+  };
+}>("/api/v1/routes/compute", async (request, reply) => {
+  const origin = request.body?.origin;
+  const destination = request.body?.destination;
+
+  const validPoint = (point?: { lat?: number; lng?: number }) =>
+    Boolean(
+      point &&
+        Number.isFinite(point.lat) &&
+        Number.isFinite(point.lng) &&
+        Number(point.lat) >= -90 &&
+        Number(point.lat) <= 90 &&
+        Number(point.lng) >= -180 &&
+        Number(point.lng) <= 180
+    );
+
+  if (!validPoint(origin) || !validPoint(destination)) {
+    return reply.code(400).send({ error: "Valid origin and destination are required." });
+  }
+
+  try {
+    return await computeRoute({
+      origin: { lat: Number(origin!.lat), lng: Number(origin!.lng) },
+      destination: { lat: Number(destination!.lat), lng: Number(destination!.lng) }
+    });
+  } catch (error) {
+    request.log.error(error);
+    return reply.code(502).send({ error: "Route calculation is temporarily unavailable." });
   }
 });
 
