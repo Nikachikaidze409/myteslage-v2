@@ -1,5 +1,10 @@
 let googleMapsPromise: Promise<typeof google> | null = null;
 
+type GoogleMapsCallbackWindow = Window &
+  typeof globalThis & {
+    __tmapGoogleMapsReady?: () => void;
+  };
+
 export function loadGoogleMaps(apiKey: string): Promise<typeof google> {
   if (window.google?.maps) {
     return Promise.resolve(window.google);
@@ -10,11 +15,12 @@ export function loadGoogleMaps(apiKey: string): Promise<typeof google> {
   }
 
   googleMapsPromise = new Promise((resolve, reject) => {
+    const callbackWindow = window as GoogleMapsCallbackWindow;
     const callbackName = "__tmapGoogleMapsReady";
 
-    (window as Window & Record<string, unknown>)[callbackName] = () => {
+    callbackWindow.__tmapGoogleMapsReady = () => {
       resolve(window.google);
-      delete (window as Window & Record<string, unknown>)[callbackName];
+      delete callbackWindow.__tmapGoogleMapsReady;
     };
 
     const script = document.createElement("script");
