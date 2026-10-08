@@ -624,6 +624,7 @@ export default function App() {
     destinationPointValue: google.maps.LatLngLiteral,
     fitPreview: boolean
   ) => {
+    const overviewPath = decodePolyline(routeData.encodedPolyline);
     const routePath = buildDetailedRoutePath(routeData);
     const cumulative = buildCumulativeDistances(routePath);
 
@@ -640,7 +641,7 @@ export default function App() {
     if (!routePolylineRef.current) {
       routePolylineRef.current = new google.maps.Polyline({
         map,
-        path: routePath,
+        path: overviewPath,
         clickable: false,
         geodesic: false,
         strokeColor: "#2563EB",
@@ -650,7 +651,7 @@ export default function App() {
       });
     } else {
       routePolylineRef.current.setMap(map);
-      routePolylineRef.current.setPath(routePath);
+      routePolylineRef.current.setPath(overviewPath);
       routePolylineRef.current.setOptions({
         strokeColor: "#2563EB",
         strokeOpacity: 0.95,
@@ -662,7 +663,7 @@ export default function App() {
       const bounds = new google.maps.LatLngBounds();
       bounds.extend(origin);
       bounds.extend(destinationPointValue);
-      for (const routePoint of routePath) bounds.extend(routePoint);
+      for (const routePoint of overviewPath) bounds.extend(routePoint);
 
       followLocationRef.current = false;
       map.fitBounds(bounds, {
@@ -733,7 +734,24 @@ export default function App() {
 
       if (map) {
         followLocationRef.current = true;
+        const rerouteMatch = matchPointToRoute(
+          origin,
+          routePathRef.current,
+          routeCumulativeRef.current,
+          null,
+          0,
+          Math.max(accuracy ?? 30, 1)
+        );
+
+        if (rerouteMatch) {
+          lastMatchedSegmentIndexRef.current = rerouteMatch.segmentIndex;
+          lastMatchedProgressMetersRef.current = rerouteMatch.progressMeters;
+          lastMatchedPointRef.current = rerouteMatch.snappedPoint;
+          routeHeadingRef.current = rerouteMatch.heading;
+        }
+
         const heading =
+          rerouteMatch?.heading ??
           routeHeadingForPoint(origin, routePathRef.current) ??
           routeHeadingRef.current ??
           smoothedHeadingRef.current;
@@ -744,7 +762,7 @@ export default function App() {
 
         updateFollowCamera(
           map,
-          origin,
+          rerouteMatch?.snappedPoint ?? origin,
           heading,
           lastSpeedRef.current,
           true
@@ -1380,7 +1398,7 @@ export default function App() {
 
     updateFollowCamera(
       map,
-      point,
+      initialMatch?.snappedPoint ?? point,
       routeHeadingRef.current ?? smoothedHeadingRef.current,
       lastSpeedRef.current,
       true
@@ -1424,7 +1442,9 @@ export default function App() {
 
       updateFollowCamera(
         map,
-        point,
+        navigationActiveRef.current
+          ? lastMatchedPointRef.current ?? point
+          : point,
         heading,
         lastSpeedRef.current,
         true
