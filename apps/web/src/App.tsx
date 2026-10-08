@@ -805,9 +805,10 @@ export default function App() {
   };
 
   const updateNavigationProgress = (
-    point: google.maps.LatLngLiteral,
+    rawPoint: google.maps.LatLngLiteral,
     positionAccuracy: number,
-    speedMetersPerSecond: number
+    speedMetersPerSecond: number,
+    matched: RouteMatch | null
   ) => {
     if (!navigationActiveRef.current) return;
 
@@ -816,12 +817,19 @@ export default function App() {
 
     if (!routeData || routePath.length < 2) return;
 
-    const progress = routeProgress(point, routePath);
+    const progress =
+      matched ??
+      routeProgress(rawPoint, routePath);
+
     if (!progress) return;
 
     const geometryRatio =
       progress.totalGeometryMeters > 0
-        ? clamp(progress.remainingGeometryMeters / progress.totalGeometryMeters, 0, 1)
+        ? clamp(
+            progress.remainingGeometryMeters / progress.totalGeometryMeters,
+            0,
+            1
+          )
         : 1;
 
     const now = performance.now();
@@ -845,7 +853,7 @@ export default function App() {
 
     if (destinationValue) {
       const directDistanceToDestination = distanceMeters(
-        point,
+        rawPoint,
         destinationValue.location
       );
 
@@ -900,18 +908,21 @@ export default function App() {
     }
 
     const grossDeviation = poorGps
-      ? progress.distanceFromRouteMeters > Math.max(180, positionAccuracy * 1.5)
-      : progress.distanceFromRouteMeters > Math.max(60, standardThreshold * 2.5);
+      ? progress.distanceFromRouteMeters >
+        Math.max(180, positionAccuracy * 1.5)
+      : progress.distanceFromRouteMeters >
+        Math.max(60, standardThreshold * 2.5);
 
     const diverging =
       offRouteCountRef.current >= 1 &&
-      progress.distanceFromRouteMeters > lastOffRouteDistanceRef.current + 8;
+      progress.distanceFromRouteMeters >
+        lastOffRouteDistanceRef.current + 8;
 
     offRouteCountRef.current += 1;
     lastOffRouteDistanceRef.current = progress.distanceFromRouteMeters;
 
     if (grossDeviation || diverging || offRouteCountRef.current >= 2) {
-      void rerouteFrom(point);
+      void rerouteFrom(rawPoint);
     }
   };
 
@@ -1042,20 +1053,45 @@ export default function App() {
 
             const gpsHeading = smoothedHeadingRef.current;
             let cameraHeading = gpsHeading;
+            let visualPoint = point;
+            let matched: RouteMatch | null = null;
 
-            if (navigationActiveRef.current && routePathRef.current.length >= 2) {
-              const routeHeading = routeHeadingForPoint(
+            if (
+              navigationActiveRef.current &&
+              routePathRef.current.length >= 2 &&
+              routeCumulativeRef.current.length === routePathRef.current.length
+            ) {
+              matched = matchPointToRoute(
                 point,
-                routePathRef.current
+                routePathRef.current,
+                routeCumulativeRef.current,
+                lastMatchedSegmentIndexRef.current,
+                lastMatchedProgressMetersRef.current,
+                positionAccuracy
               );
 
-              if (routeHeading !== null) {
-                routeHeadingRef.current = smoothHeading(
-                  routeHeadingRef.current,
-                  routeHeading,
-                  0.45
+              if (matched) {
+                const snapThreshold = Math.min(
+                  180,
+                  Math.max(35, positionAccuracy * 1.25)
                 );
-                cameraHeading = routeHeadingRef.current;
+
+                if (matched.distanceFromRouteMeters <= snapThreshold) {
+                  lastMatchedSegmentIndexRef.current = matched.segmentIndex;
+                  lastMatchedProgressMetersRef.current = Math.max(
+                    lastMatchedProgressMetersRef.current,
+                    matched.progressMeters
+                  );
+                  lastMatchedPointRef.current = matched.snappedPoint;
+                  visualPoint = matched.snappedPoint;
+
+                  routeHeadingRef.current = smoothHeading(
+                    routeHeadingRef.current,
+                    matched.heading,
+                    0.45
+                  );
+                  cameraHeading = routeHeadingRef.current;
+                }
               }
             }
 
@@ -1075,25 +1111,30 @@ export default function App() {
             if (!locationMarkerRef.current) {
               locationMarkerRef.current = new google.maps.Marker({
                 map,
-                position: point,
+                position: visualPoint,
                 clickable: false,
                 optimized: true,
                 icon: markerIcon,
                 zIndex: 10
               });
             } else {
-              locationMarkerRef.current.setPosition(point);
+              locationMarkerRef.current.setPosition(visualPoint);
               locationMarkerRef.current.setIcon(markerIcon);
             }
 
             updateFollowCamera(
               map,
-              point,
+              visualPoint,
               cameraHeading,
               speed
             );
 
-            updateNavigationProgress(point, positionAccuracy, speed);
+            updateNavigationProgress(
+              point,
+              positionAccuracy,
+              speed,
+              matched
+            );
           },
           (error) => {
             if (error.code === error.PERMISSION_DENIED) {
