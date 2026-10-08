@@ -31,6 +31,7 @@ type RouteStep = {
   distanceMeters: number;
   maneuver: string;
   instruction: string;
+  encodedPolyline: string;
 };
 
 type RouteResult = {
@@ -43,6 +44,16 @@ type RouteResult = {
 
 type RouteProgress = {
   distanceFromRouteMeters: number;
+  remainingGeometryMeters: number;
+  totalGeometryMeters: number;
+};
+
+type RouteMatch = {
+  snappedPoint: google.maps.LatLngLiteral;
+  heading: number;
+  distanceFromRouteMeters: number;
+  segmentIndex: number;
+  progressMeters: number;
   remainingGeometryMeters: number;
   totalGeometryMeters: number;
 };
@@ -295,6 +306,126 @@ function readTheme(): ThemeMode {
   }
 }
 
+function buildDetailedRoutePath(route: RouteResult) {
+  const detailed = route.steps
+    .filter((step) => step.encodedPolyline)
+    .flatMap((step) => decodePolyline(step.encodedPolyline));
+
+  if (detailed.length >= 2) return detailed;
+  return decodePolyline(route.encodedPolyline);
+}
+
+function buildCumulativeDistances(path: google.maps.LatLngLiteral[]) {
+  const cumulative = [0];
+
+  for (let index = 0; index < path.length - 1; index += 1) {
+    cumulative.push(
+      cumulative[index] + distanceMeters(path[index], path[index + 1])
+    );
+  }
+
+  return cumulative;
+}
+
+function matchPointToRoute(
+  point: google.maps.LatLngLiteral,
+  path: google.maps.LatLngLiteral[],
+  cumulative: number[],
+  previousSegmentIndex: number | null,
+  previousProgressMeters: number,
+  accuracyMeters: number
+): RouteMatch | null {
+  if (path.length < 2 || cumulative.length !== path.length) return null;
+
+  const earthRadius = 6371000;
+  const latScale = earthRadius * (Math.PI / 180);
+  const lngScale =
+    earthRadius * Math.cos(toRadians(point.lat)) * (Math.PI / 180);
+
+  const startIndex =
+    previousSegmentIndex === null ? 0 : Math.max(0, previousSegmentIndex - 8);
+  const endIndex =
+    previousSegmentIndex === null
+      ? path.length - 2
+      : Math.min(path.length - 2, previousSegmentIndex + 45);
+
+  let best:
+    | {
+        distance: number;
+        segmentIndex: number;
+        t: number;
+        snappedPoint: google.maps.LatLngLiteral;
+        progressMeters: number;
+        heading: number;
+      }
+    | null = null;
+
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    const a = path[index];
+    const b = path[index + 1];
+
+    const ax = (a.lng - point.lng) * lngScale;
+    const ay = (a.lat - point.lat) * latScale;
+    const bx = (b.lng - point.lng) * lngScale;
+    const by = (b.lat - point.lat) * latScale;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    const denominator = dx * dx + dy * dy;
+    const t =
+      denominator === 0
+        ? 0
+        : clamp(-(ax * dx + ay * dy) / denominator, 0, 1);
+
+    const px = ax + dx * t;
+    const py = ay + dy * t;
+    const distance = Math.hypot(px, py);
+    const segmentLength = cumulative[index + 1] - cumulative[index];
+    const progressMeters = cumulative[index] + segmentLength * t;
+
+    const backwardTolerance = Math.max(20, Math.min(accuracyMeters * 0.35, 55));
+    if (
+      previousSegmentIndex !== null &&
+      progressMeters < previousProgressMeters - backwardTolerance
+    ) {
+      continue;
+    }
+
+    const snappedPoint = {
+      lat: a.lat + (b.lat - a.lat) * t,
+      lng: a.lng + (b.lng - a.lng) * t
+    };
+
+    if (!best || distance < best.distance) {
+      best = {
+        distance,
+        segmentIndex: index,
+        t,
+        snappedPoint,
+        progressMeters,
+        heading: bearingDegrees(a, b)
+      };
+    }
+  }
+
+  if (!best) return null;
+
+  const totalGeometryMeters = cumulative[cumulative.length - 1];
+
+  return {
+    snappedPoint: best.snappedPoint,
+    heading: best.heading,
+    distanceFromRouteMeters: best.distance,
+    segmentIndex: best.segmentIndex,
+    progressMeters: best.progressMeters,
+    remainingGeometryMeters: Math.max(
+      0,
+      totalGeometryMeters - best.progressMeters
+    ),
+    totalGeometryMeters
+  };
+}
+
 function routeHeadingForPoint(
   point: google.maps.LatLngLiteral,
   path: google.maps.LatLngLiteral[]
@@ -414,6 +545,10 @@ export default function App() {
   const destinationRef = useRef<PlaceSelection | null>(null);
   const routeRef = useRef<RouteResult | null>(null);
   const routePathRef = useRef<google.maps.LatLngLiteral[]>([]);
+  const routeCumulativeRef = useRef<number[]>([]);
+  const lastMatchedSegmentIndexRef = useRef<number | null>(null);
+  const lastMatchedProgressMetersRef = useRef(0);
+  const lastMatchedPointRef = useRef<google.maps.LatLngLiteral | null>(null);
   const navigationActiveRef = useRef(false);
   const rerouteInFlightRef = useRef(false);
   const lastRerouteAtRef = useRef(0);
@@ -489,10 +624,15 @@ export default function App() {
     destinationPointValue: google.maps.LatLngLiteral,
     fitPreview: boolean
   ) => {
-    const routePath = decodePolyline(routeData.encodedPolyline);
+    const routePath = buildDetailedRoutePath(routeData);
+    const cumulative = buildCumulativeDistances(routePath);
 
     routeRef.current = routeData;
     routePathRef.current = routePath;
+    routeCumulativeRef.current = cumulative;
+    lastMatchedSegmentIndexRef.current = null;
+    lastMatchedProgressMetersRef.current = 0;
+    lastMatchedPointRef.current = null;
     setRoute(routeData);
     setRemainingDistanceMeters(routeData.distanceMeters);
     setRemainingDurationSeconds(routeData.durationSeconds);
@@ -639,6 +779,10 @@ export default function App() {
 
     routePolylineRef.current?.setMap(null);
     routePathRef.current = [];
+    routeCumulativeRef.current = [];
+    lastMatchedSegmentIndexRef.current = null;
+    lastMatchedProgressMetersRef.current = 0;
+    lastMatchedPointRef.current = null;
     routeRef.current = null;
     setRoute(null);
 
@@ -1105,6 +1249,10 @@ export default function App() {
         });
         routeRef.current = null;
         routePathRef.current = [];
+        routeCumulativeRef.current = [];
+        lastMatchedSegmentIndexRef.current = null;
+        lastMatchedProgressMetersRef.current = 0;
+        lastMatchedPointRef.current = null;
         setRoute(null);
         setRouteError("Waiting for GPS before calculating route");
         return;
@@ -1152,10 +1300,26 @@ export default function App() {
     arrivalConfirmCountRef.current = 0;
     setArrivalState("none");
     navigationActiveRef.current = true;
-    routeHeadingRef.current = routeHeadingForPoint(
+    const initialMatch = matchPointToRoute(
       point,
-      routePathRef.current
+      routePathRef.current,
+      routeCumulativeRef.current,
+      null,
+      0,
+      Math.max(accuracy ?? 30, 1)
     );
+
+    if (initialMatch) {
+      lastMatchedSegmentIndexRef.current = initialMatch.segmentIndex;
+      lastMatchedProgressMetersRef.current = initialMatch.progressMeters;
+      lastMatchedPointRef.current = initialMatch.snappedPoint;
+      routeHeadingRef.current = initialMatch.heading;
+    } else {
+      routeHeadingRef.current = routeHeadingForPoint(
+        point,
+        routePathRef.current
+      );
+    }
     setNavigationActive(true);
     setSearchOpen(false);
     setRouteError(null);
