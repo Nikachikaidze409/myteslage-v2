@@ -10,6 +10,7 @@ export type RouteStep = {
   distanceMeters: number;
   maneuver: string;
   instruction: string;
+  encodedPolyline: string;
 };
 
 export type RouteResult = {
@@ -76,7 +77,7 @@ function routeCacheKey(input: RouteInput) {
     rounded(input.destination.lng, 5)
   ].join(":");
 
-  return `routes:v2:${compactHash(key)}`;
+  return `routes:v3:${compactHash(key)}`;
 }
 
 function parseDurationSeconds(value?: string) {
@@ -99,7 +100,7 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask":
-          "routes.distanceMeters,routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.legs.steps.distanceMeters,routes.legs.steps.navigationInstruction"
+          "routes.distanceMeters,routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.legs.steps.distanceMeters,routes.legs.steps.navigationInstruction,routes.legs.steps.polyline.encodedPolyline"
       },
       body: JSON.stringify({
         origin: {
@@ -151,6 +152,9 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
             maneuver?: string;
             instructions?: string;
           };
+          polyline?: {
+            encodedPolyline?: string;
+          };
         }>;
       }>;
     }>;
@@ -169,7 +173,8 @@ async function fetchRoute(input: RouteInput): Promise<RouteResult> {
       maneuver: step.navigationInstruction?.maneuver ?? "STRAIGHT",
       instruction:
         step.navigationInstruction?.instructions ??
-        "Continue on the current road"
+        "Continue on the current road",
+      encodedPolyline: step.polyline?.encodedPolyline ?? ""
     }))
     .filter((step) => step.distanceMeters > 0 || step.instruction.length > 0);
 
